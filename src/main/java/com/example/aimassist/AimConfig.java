@@ -27,6 +27,9 @@ public class AimConfig {
     public boolean visibleOnly = true; // только цели в прямой видимости
     public boolean holdAttackOnly = false; // наводиться только при зажатой ЛКМ
     public boolean autoAttack = false;     // бить, когда прицел на хитбоксе игрока
+    public AttackMode attackMode = AttackMode.SMART; // обычный или умный режим
+    public int smartMaxWait = 12;         // сколько тиков умный режим ждёт падения ради крита
+    public boolean attackDebug = true;    // писать на экране, почему автоудар не бьёт
     public WeaponFilter weapon = WeaponFilter.ANY; // с каким оружием в руке бить
     public boolean fullChargeOnly = true;  // только полностью заряженный удар (полный взмах)
     public double attackCharge = 0.9;      // мин. заряд, если fullChargeOnly выключен (0.1 .. 1.0)

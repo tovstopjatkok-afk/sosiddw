@@ -45,6 +45,10 @@ public class AimAssistClient implements ClientModInitializer {
     // Шаг поворота предыдущего кадра, для сглаживания разгона и торможения камеры
     private float lastStepYaw, lastStepPitch;
 
+    // Умный режим автоудара: сколько тиков уже ждём падения ради крита, и пауза между подсказками
+    private int smartWait;
+    private int statusCooldown;
+
     // Результат rotationTo, чтобы не создавать массив на каждый вызов
     private float rotYaw, rotPitch;
 
@@ -245,30 +249,93 @@ public class AimAssistClient implements ClientModInitializer {
      */
     private void autoAttack(MinecraftClient client) {
         AimConfig cfg = AimConfig.INSTANCE;
+        if (statusCooldown > 0) statusCooldown--;
         if (!cfg.autoAttack) return;
 
         ClientPlayerEntity me = client.player;
         if (me == null || client.world == null || client.interactionManager == null) return;
         if (client.currentScreen != null || !me.isAlive() || me.isSpectator()) return;
 
-        if (!(client.crosshairTarget instanceof EntityHitResult hit)) return;
-        if (!(hit.getEntity() instanceof PlayerEntity victim) || !victim.isAlive()) return;
+        if (!(client.crosshairTarget instanceof EntityHitResult hit)
+                || !(hit.getEntity() instanceof PlayerEntity victim) || !victim.isAlive()) {
+            smartWait = 0;
+            if (target != null) {
+                status(me, String.format(java.util.Locale.ROOT,
+                        "цель в %.1f бл., но не в прицеле или дальше досягаемости (~3 бл.)", me.distanceTo(target)));
+            }
+            return;
+        }
 
         // Только с нужным оружием в руке
-        if (!weaponAllowed(me, cfg)) return;
+        if (!weaponAllowed(me, cfg)) {
+            status(me, "в руке не то оружие");
+            return;
+        }
 
         // Не бить, пока ешь / пьёшь / блокируешь щитом / тянешь лук
-        if (cfg.noHitWhileUsing && me.isUsingItem()) return;
+        if (cfg.noHitWhileUsing && me.isUsingItem()) {
+            status(me, "использую предмет (еда, щит, лук)");
+            return;
+        }
 
         // Заряд оружия: полный взмах или заданный минимум
         float needCharge = cfg.fullChargeOnly ? 1.0f : (float) cfg.attackCharge;
-        if (me.getAttackCooldownProgress(0.5f) < needCharge) return;
+        float charge = me.getAttackCooldownProgress(0.5f);
+        if (charge < needCharge) {
+            status(me, "заряд удара " + Math.round(charge * 100) + "%");
+            return;
+        }
+
+        // Умный режим: решает, бить сразу (комбо) или подождать падения (крит)
+        if (cfg.attackMode == AttackMode.SMART && !smartAllows(client, me, cfg)) return;
 
         // Только крит: падаем, не на земле, не в воде, не на лестнице, не в спринте
-        if (cfg.critOnly && !canCrit(me)) return;
+        if (cfg.critOnly && !canCrit(me)) {
+            status(me, "жду крит (только криты)");
+            return;
+        }
 
         client.interactionManager.attackEntity(me, victim);
         me.swingHand(Hand.MAIN_HAND);
+        smartWait = 0;
+
+        // Если это сообщение видно, а урона нет, значит мод ударил, но сервер удар не принял
+        statusCooldown = 0;
+        status(me, "удар отправлен: " + victim.getName().getString());
+    }
+
+    /**
+     * Умный режим. Намерение игрока определяется по его действиям:
+     *  - на земле без прыжка, или в спринте: идёт комбо, бьём сразу, как зарядился взмах;
+     *  - зажат прыжок или игрок в воздухе (не в спринте): идёт крит, ждём падения
+     *    (удар на подъёме не критует и зря сбрасывает заряд). Если крит не дождались за
+     *    заданное число тиков, бьём обычным ударом.
+     */
+    private boolean smartAllows(MinecraftClient client, ClientPlayerEntity me, AimConfig cfg) {
+        boolean jumpHeld = client.options.jumpKey.isPressed();
+        boolean airborne = !me.isOnGround() && !me.isClimbing() && !me.isTouchingWater() && !me.hasVehicle();
+        boolean wantsCrit = (jumpHeld || airborne) && !me.isSprinting();
+
+        if (!wantsCrit || canCrit(me)) {
+            smartWait = 0;
+            return true; // комбо или крит уже готов
+        }
+
+        smartWait++;
+        if (smartWait > Math.max(cfg.smartMaxWait, 1)) {
+            smartWait = 0;
+            status(me, "крит не дождался, бью обычным");
+            return true;
+        }
+        status(me, "умный режим: жду падения для крита");
+        return false;
+    }
+
+    /** Короткое сообщение над хотбаром о том, почему автоудар сейчас не бьёт (раз в полсекунды). */
+    private void status(ClientPlayerEntity me, String message) {
+        if (!AimConfig.INSTANCE.attackDebug || statusCooldown > 0) return;
+        statusCooldown = 10;
+        me.sendMessage(Text.literal("Автоудар: " + message).formatted(Formatting.GRAY), true);
     }
 
     private static boolean weaponAllowed(ClientPlayerEntity me, AimConfig cfg) {

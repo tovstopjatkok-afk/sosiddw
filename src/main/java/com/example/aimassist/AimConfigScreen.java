@@ -123,12 +123,16 @@ public class AimConfigScreen extends Screen {
 
         Card atk = new Card(0, "Auto Attack", "Бьёт, когда прицел на хитбоксе игрока",
                 () -> cfg.autoAttack, v -> cfg.autoAttack = v);
+        atk.rows.add(new CycleRow<>("Режим", Arrays.asList(AttackMode.values()),
+                () -> cfg.attackMode, v -> cfg.attackMode = v, m -> m.label));
+        atk.rows.add(new SliderRow("Ожидание крита (тики)", 2, 20, 0, "", () -> cfg.smartMaxWait, v -> cfg.smartMaxWait = (int) v));
         atk.rows.add(new CycleRow<>("Оружие в руке", Arrays.asList(WeaponFilter.values()),
                 () -> cfg.weapon, v -> cfg.weapon = v, w -> w.label));
         atk.rows.add(new ToggleRow("Только полный взмах (100%)", () -> cfg.fullChargeOnly, v -> cfg.fullChargeOnly = v));
         atk.rows.add(new SliderRow("Мин. заряд (если взмах выкл.)", 0.1, 1.0, 2, "", () -> cfg.attackCharge, v -> cfg.attackCharge = v));
         atk.rows.add(new ToggleRow("Только криты", () -> cfg.critOnly, v -> cfg.critOnly = v));
         atk.rows.add(new ToggleRow("Не бить при еде / щите / луке", () -> cfg.noHitWhileUsing, v -> cfg.noHitWhileUsing = v));
+        atk.rows.add(new ToggleRow("Подсказки на экране (отладка)", () -> cfg.attackDebug, v -> cfg.attackDebug = v));
         cards.add(atk);
 
         // ---- Visual ----
