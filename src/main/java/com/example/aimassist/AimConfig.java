@@ -27,6 +27,9 @@ public class AimConfig {
     public boolean visibleOnly = true; // только цели в прямой видимости
     public boolean holdAttackOnly = false; // наводиться только при зажатой ЛКМ
     public boolean autoAttack = false;     // бить, когда прицел на хитбоксе игрока
+    public int attackKeyCode = -1;        // клавиша автоудара (-1 = не задана)
+    public boolean attackKeyMouse = false; // true, если это кнопка мыши
+    public BindMode attackBindMode = BindMode.TOGGLE;
     public AttackMode attackMode = AttackMode.SMART; // обычный или умный режим
     public int smartMaxWait = 12;         // сколько тиков умный режим ждёт падения ради крита
     public boolean attackDebug = true;    // писать на экране, почему автоудар не бьёт

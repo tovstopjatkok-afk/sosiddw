@@ -3,11 +3,14 @@ package com.example.aimassist;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.TextFieldWidget;
+import net.minecraft.client.util.InputUtil;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.MathHelper;
+
+import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -70,6 +73,9 @@ public class AimConfigScreen extends Screen {
     private double scroll = 0;
     private SliderRow dragging;
 
+    // Строка выбора клавиши, которая сейчас ждёт нажатия
+    private BindRow listening;
+
     // Открытый выпадающий список
     private CycleRow<?> drop;
     private int dropX, dropY, dropW, dropH;
@@ -94,6 +100,7 @@ public class AimConfigScreen extends Screen {
 
         tabIcons = new ItemStack[]{new ItemStack(Items.DIAMOND_SWORD), new ItemStack(Items.ENDER_EYE)};
         drop = null;
+        listening = null;
 
         winW = Math.min(470, this.width - 16);
         winH = Math.min(330, this.height - 24);
@@ -125,6 +132,9 @@ public class AimConfigScreen extends Screen {
                 () -> cfg.autoAttack, v -> cfg.autoAttack = v);
         atk.rows.add(new CycleRow<>("Режим", Arrays.asList(AttackMode.values()),
                 () -> cfg.attackMode, v -> cfg.attackMode = v, m -> m.label));
+        atk.rows.add(new BindRow("Клавиша"));
+        atk.rows.add(new CycleRow<>("Режим клавиши", Arrays.asList(BindMode.values()),
+                () -> cfg.attackBindMode, v -> cfg.attackBindMode = v, m -> m.label));
         atk.rows.add(new SliderRow("Ожидание крита (тики)", 2, 20, 0, "", () -> cfg.smartMaxWait, v -> cfg.smartMaxWait = (int) v));
         atk.rows.add(new CycleRow<>("Оружие в руке", Arrays.asList(WeaponFilter.values()),
                 () -> cfg.weapon, v -> cfg.weapon = v, w -> w.label));
@@ -472,7 +482,34 @@ public class AimConfigScreen extends Screen {
     }
 
     @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (listening != null) {
+            AimConfig cfg = AimConfig.INSTANCE;
+            if (keyCode == GLFW.GLFW_KEY_DELETE || keyCode == GLFW.GLFW_KEY_BACKSPACE) {
+                cfg.attackKeyCode = -1; // снять клавишу
+                cfg.attackKeyMouse = false;
+            } else if (keyCode != GLFW.GLFW_KEY_ESCAPE) { // Esc просто отменяет выбор
+                cfg.attackKeyCode = keyCode;
+                cfg.attackKeyMouse = false;
+            }
+            listening = null;
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
+    }
+
+    @Override
     public boolean mouseClicked(double mx, double my, int button) {
+        // Ждём клавишу: боковые и средняя кнопки мыши привязываются, ЛКМ и ПКМ отменяют выбор
+        if (listening != null) {
+            if (button >= 2) {
+                AimConfig.INSTANCE.attackKeyCode = button;
+                AimConfig.INSTANCE.attackKeyMouse = true;
+            }
+            listening = null;
+            return true;
+        }
+
         // Открытый список перехватывает клик первым
         if (drop != null) {
             CycleRow<?> d = drop;
@@ -813,6 +850,46 @@ public class AimConfigScreen extends Screen {
                     set.accept(SWATCHES[i]);
                     return true;
                 }
+            }
+            return false;
+        }
+    }
+
+    /** Строка выбора клавиши: клик, затем нажмите клавишу (Delete - снять, Esc - отмена). */
+    private final class BindRow extends Row {
+        BindRow(String label) {
+            super(label);
+        }
+
+        @Override
+        int height() {
+            return 22;
+        }
+
+        private String keyName() {
+            AimConfig cfg = AimConfig.INSTANCE;
+            if (cfg.attackKeyCode < 0) return "Не задана";
+            InputUtil.Key key = (cfg.attackKeyMouse ? InputUtil.Type.MOUSE : InputUtil.Type.KEYSYM)
+                    .createFromCode(cfg.attackKeyCode);
+            return key.getLocalizedText().getString();
+        }
+
+        @Override
+        void draw(DrawContext ctx, int mx, int my) {
+            boolean waiting = listening == this;
+            ctx.drawTextWithShadow(textRenderer, label, x, y + 7, hit(mx, my) || waiting ? TEXT : TEXT_DIM);
+            String s = waiting ? "Нажмите клавишу..." : keyName();
+            int bw = Math.max(72, textRenderer.getWidth(s) + 16);
+            int bx = x + w - bw;
+            box(ctx, bx, y + 2, bw, 18, FIELD, waiting ? accent() : BORDER);
+            ctx.drawCenteredTextWithShadow(textRenderer, s, bx + bw / 2, y + 7, waiting ? TEXT : TEXT_DIM);
+        }
+
+        @Override
+        boolean click(double mx, double my, int button) {
+            if (button == 0 && hit(mx, my)) {
+                listening = this;
+                return true;
             }
             return false;
         }

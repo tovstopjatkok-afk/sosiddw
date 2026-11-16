@@ -49,6 +49,10 @@ public class AimAssistClient implements ClientModInitializer {
     private int smartWait;
     private int statusCooldown;
 
+    // Клавиша автоудара
+    private boolean attackKeyWasDown;
+    private boolean attackKeyHeld;
+
     // Результат rotationTo, чтобы не создавать массив на каждый вызов
     private float rotYaw, rotPitch;
 
@@ -82,6 +86,7 @@ public class AimAssistClient implements ClientModInitializer {
                             true);
                 }
             }
+            handleAttackBind(client);
             autoAttack(client);
             updateTarget(client);
         });
@@ -243,6 +248,33 @@ public class AimAssistClient implements ClientModInitializer {
 
     // ---------------------------------------------------------------- автоудар (раз в тик)
 
+    /** Опрашивает клавишу автоудара. В режиме «Переключатель» нажатие включает или выключает автоудар. */
+    private void handleAttackBind(MinecraftClient client) {
+        AimConfig cfg = AimConfig.INSTANCE;
+        boolean down = cfg.attackKeyCode >= 0 && client.currentScreen == null && isDown(client, cfg);
+        attackKeyHeld = down;
+
+        if (down && !attackKeyWasDown && cfg.attackBindMode == BindMode.TOGGLE) {
+            cfg.autoAttack = !cfg.autoAttack;
+            AimConfig.save();
+            if (client.player != null) {
+                client.player.sendMessage(
+                        Text.literal("Auto Attack: ")
+                                .append(Text.literal(cfg.autoAttack ? "ON" : "OFF")
+                                        .formatted(cfg.autoAttack ? Formatting.GREEN : Formatting.RED)),
+                        true);
+            }
+        }
+        attackKeyWasDown = down;
+    }
+
+    private static boolean isDown(MinecraftClient client, AimConfig cfg) {
+        long window = client.getWindow().getHandle();
+        return cfg.attackKeyMouse
+                ? GLFW.glfwGetMouseButton(window, cfg.attackKeyCode) == GLFW.GLFW_PRESS
+                : InputUtil.isKeyPressed(window, cfg.attackKeyCode);
+    }
+
     /**
      * Автоудар: если прицел (реальный crosshairTarget, то есть хитбокс) смотрит на игрока
      * и выполнены условия из настроек, бьём.
@@ -250,7 +282,10 @@ public class AimAssistClient implements ClientModInitializer {
     private void autoAttack(MinecraftClient client) {
         AimConfig cfg = AimConfig.INSTANCE;
         if (statusCooldown > 0) statusCooldown--;
-        if (!cfg.autoAttack) return;
+
+        // С клавишей в режиме «Удержание» автоудар работает, только пока она зажата
+        boolean holdMode = cfg.attackKeyCode >= 0 && cfg.attackBindMode == BindMode.HOLD;
+        if (!(holdMode ? attackKeyHeld : cfg.autoAttack)) return;
 
         ClientPlayerEntity me = client.player;
         if (me == null || client.world == null || client.interactionManager == null) return;
