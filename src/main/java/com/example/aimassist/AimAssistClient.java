@@ -3,20 +3,29 @@ package com.example.aimassist;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.render.VertexRendering;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import java.util.Random;
 import net.minecraft.world.RaycastContext;
 import org.lwjgl.glfw.GLFW;
 
@@ -38,6 +47,9 @@ public class AimAssistClient implements ClientModInitializer {
 
     // Результат rotationTo, чтобы не создавать массив на каждый вызов
     private float rotYaw, rotPitch;
+
+    // Внутри этого угла (градусы) камеру уже не двигаем: прицел в центре цели
+    private static final float DEADZONE = 0.15f;
 
     @Override
     public void onInitializeClient() {
@@ -72,6 +84,9 @@ public class AimAssistClient implements ClientModInitializer {
 
         // Поворот камеры каждый кадр, а не каждый тик, иначе камера дёргается
         WorldRenderEvents.START.register(context -> onFrame(MinecraftClient.getInstance()));
+
+        // Обводка цели рисуется после сущностей
+        WorldRenderEvents.AFTER_ENTITIES.register(this::renderEsp);
     }
 
     // ---------------------------------------------------------------- цель (раз в тик)
@@ -84,7 +99,28 @@ public class AimAssistClient implements ClientModInitializer {
             target = null;
             return;
         }
+
+        // Цель «залипает»: пока она жива, в зоне и видима, аим не перескакивает на другого игрока,
+        // даже если тот встал ближе к прицелу. Новая цель ищется только когда старая потеряна.
+        if (target != null && stillValid(client, me, cfg, target)) return;
         target = findTarget(client, me, cfg);
+    }
+
+    private boolean stillValid(MinecraftClient client, ClientPlayerEntity me, AimConfig cfg, PlayerEntity t) {
+        if (t.isRemoved() || !t.isAlive() || t.isSpectator()) return false;
+
+        // Небольшой запас (гистерезис), чтобы цель не терялась на границе зоны
+        double range = cfg.range * 1.1;
+        if (me.squaredDistanceTo(t) > range * range) return false;
+
+        Vec3d eye = me.getEyePos();
+        Vec3d point = aimPoint(t, 1.0f);
+        rotationTo(eye, point);
+        float yawDiff = MathHelper.wrapDegrees(rotYaw - me.getYaw());
+        float pitchDiff = rotPitch - me.getPitch();
+        if (Math.sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff) > cfg.fov / 2.0 * 1.25) return false;
+
+        return !cfg.visibleOnly || canSee(client, me, eye, point);
     }
 
     private PlayerEntity findTarget(MinecraftClient client, ClientPlayerEntity me, AimConfig cfg) {
@@ -99,7 +135,7 @@ public class AimAssistClient implements ClientModInitializer {
             if (p == me || !p.isAlive() || p.isSpectator()) continue;
             if (me.squaredDistanceTo(p) > rangeSq) continue; // дешёвая проверка идёт первой
 
-            Vec3d point = aimPoint(p, cfg, 1.0f);
+            Vec3d point = aimPoint(p, 1.0f);
             rotationTo(eye, point);
             float yawDiff = MathHelper.wrapDegrees(rotYaw - me.getYaw());
             float pitchDiff = rotPitch - me.getPitch();
@@ -146,7 +182,7 @@ public class AimAssistClient implements ClientModInitializer {
         // Интерполированные позиции: камера движется плавно между тиками, а не рывками
         float td = client.getRenderTickCounter().getTickDelta(false);
         Vec3d eye = me.getCameraPosVec(td);
-        rotationTo(eye, aimPoint(t, cfg, td));
+        rotationTo(eye, aimPoint(t, td));
 
         float yawDiff = MathHelper.wrapDegrees(rotYaw - me.getYaw());
         float pitchDiff = rotPitch - me.getPitch();
@@ -160,12 +196,23 @@ public class AimAssistClient implements ClientModInitializer {
             stepYaw = lastStepYaw + (stepYaw - lastStepYaw) * (float) a;
             stepPitch = lastStepPitch + (stepPitch - lastStepPitch) * (float) a;
         }
+
+        // Доводим ровно до центра и не дальше: шаг никогда не больше остатка пути
+        stepYaw = clampToward(stepYaw, yawDiff);
+        stepPitch = clampToward(stepPitch, pitchDiff);
+
         lastStepYaw = stepYaw;
         lastStepPitch = stepPitch;
 
         // changeLookDirection сам обновляет prevYaw/prevPitch, поэтому камера не дрожит.
         // Внутри он умножает на 0.15, поэтому делим на это число.
         me.changeLookDirection(stepYaw / 0.15, stepPitch / 0.15);
+    }
+
+    /** Не даёт перелететь цель: шаг в ту же сторону и не больше оставшегося угла. */
+    private static float clampToward(float step, float diff) {
+        if (Math.abs(diff) < DEADZONE) return 0f;
+        return diff > 0 ? MathHelper.clamp(step, 0f, diff) : MathHelper.clamp(step, diff, 0f);
     }
 
     /** Шаг поворота по одной оси за этот кадр. diff - сколько градусов осталось до цели. */
@@ -207,6 +254,9 @@ public class AimAssistClient implements ClientModInitializer {
         if (!(client.crosshairTarget instanceof EntityHitResult hit)) return;
         if (!(hit.getEntity() instanceof PlayerEntity victim) || !victim.isAlive()) return;
 
+        // Только с нужным оружием в руке
+        if (!weaponAllowed(me, cfg)) return;
+
         // Не бить, пока ешь / пьёшь / блокируешь щитом / тянешь лук
         if (cfg.noHitWhileUsing && me.isUsingItem()) return;
 
@@ -219,6 +269,15 @@ public class AimAssistClient implements ClientModInitializer {
 
         client.interactionManager.attackEntity(me, victim);
         me.swingHand(Hand.MAIN_HAND);
+    }
+
+    private static boolean weaponAllowed(ClientPlayerEntity me, AimConfig cfg) {
+        ItemStack stack = me.getMainHandStack();
+        return switch (cfg.weapon) {
+            case ANY -> true;
+            case SWORD -> stack.isIn(ItemTags.SWORDS);
+            case SWORD_AXE -> stack.isIn(ItemTags.SWORDS) || stack.isIn(ItemTags.AXES);
+        };
     }
 
     /** Условия критического удара в ванильной механике. */
@@ -234,9 +293,9 @@ public class AimAssistClient implements ClientModInitializer {
 
     // ---------------------------------------------------------------- геометрия
 
-    private static Vec3d aimPoint(PlayerEntity target, AimConfig cfg, float tickDelta) {
-        double h = cfg.aimAtHead ? target.getEyeHeight(target.getPose()) : target.getHeight() * 0.5;
-        return target.getLerpedPos(tickDelta).add(0, h, 0);
+    /** Точка прицеливания: всегда центр хитбокса цели. */
+    private static Vec3d aimPoint(PlayerEntity target, float tickDelta) {
+        return target.getLerpedPos(tickDelta).add(0, target.getHeight() * 0.5, 0);
     }
 
     /** Считает yaw/pitch в градусах (система координат Minecraft) в поля rotYaw/rotPitch. */
@@ -248,5 +307,139 @@ public class AimAssistClient implements ClientModInitializer {
 
         rotYaw = MathHelper.wrapDegrees((float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0));
         rotPitch = MathHelper.clamp((float) -Math.toDegrees(Math.atan2(dy, horizontal)), -90f, 90f);
+    }
+
+    // ---------------------------------------------------------------- обводка цели
+
+    private void renderEsp(WorldRenderContext context) {
+        AimConfig cfg = AimConfig.INSTANCE;
+        PlayerEntity t = target;
+        if (!cfg.enabled || !cfg.espEnabled || t == null || t.isRemoved()) return;
+        if (context.consumers() == null || context.matrixStack() == null) return;
+
+        float td = MinecraftClient.getInstance().getRenderTickCounter().getTickDelta(false);
+        Vec3d cam = context.camera().getPos();
+        Vec3d shift = t.getLerpedPos(td).subtract(t.getPos());
+        Box box = t.getBoundingBox().offset(shift);
+
+        float r = ((cfg.espColor >> 16) & 255) / 255f;
+        float g = ((cfg.espColor >> 8) & 255) / 255f;
+        float b = (cfg.espColor & 255) / 255f;
+
+        MatrixStack ms = context.matrixStack();
+        VertexConsumer lines = context.consumers().getBuffer(RenderLayer.getLines());
+        ms.push();
+        ms.translate(-cam.x, -cam.y, -cam.z);
+
+        double seconds = (System.currentTimeMillis() % 1_000_000L) / 1000.0;
+        double speed = Math.max(cfg.espSpeed, 0.05);
+
+        // Основная рамка
+        if (cfg.espFrame) {
+            VertexRendering.drawBox(ms, lines, box.expand(0.01), r, g, b, 0.95f);
+        }
+
+        switch (cfg.espStyle) {
+            case PULSE -> {
+                // От рамки расходится затухающая волна
+                float phase = (float) ((seconds * speed) % 1.0);
+                VertexRendering.drawBox(ms, lines, box.expand(0.02 + 0.30 * phase), r, g, b, 0.9f * (1f - phase));
+            }
+            case WAVE -> {
+                // Кольцо поднимается от ног к голове, за ним тянется короткий след
+                double phase = (seconds * speed * 0.8) % 1.0;
+                double height = box.getLengthY();
+                for (int k = 0; k < 4; k++) {
+                    double p = phase - k * 0.05;
+                    if (p < 0) continue;
+                    double y = box.minY + p * height;
+                    float a = (float) (Math.sin(p * Math.PI) * (1.0 - k * 0.25));
+                    Box ring = new Box(box.minX - 0.04, y, box.minZ - 0.04, box.maxX + 0.04, y + 0.03, box.maxZ + 0.04);
+                    VertexRendering.drawBox(ms, lines, ring, r, g, b, Math.max(a, 0f));
+                }
+            }
+            case LIGHTNING -> drawLightning(ms.peek(), lines, box, cfg);
+            default -> { }
+        }
+
+        ms.pop();
+    }
+
+    // ---------------------------------------------------------------- молнии
+
+    /**
+     * Мелкие молнии «бьют током» по поверхности тела. Рисунок молний обновляется несколько раз
+     * в секунду (скорость задаёт настройка), поэтому они мерцают и трещат.
+     */
+    private static void drawLightning(MatrixStack.Entry entry, VertexConsumer lines, Box box, AimConfig cfg) {
+        long bucket = (long) (System.currentTimeMillis() * Math.max(cfg.espSpeed, 0.2) / 70.0);
+        Random rnd = new Random(bucket * 1_000_003L + 17L);
+
+        int rgb = cfg.espColor & 0xFFFFFF;
+        int bright = mixWhite(rgb, 0.6f);
+        double e = 0.04; // молнии чуть снаружи модели, чтобы их не закрывало тело
+        double[] lo = {box.minX - e, box.minY - e, box.minZ - e};
+        double[] hi = {box.maxX + e, box.maxY + e, box.maxZ + e};
+
+        int bolts = Math.max(1, cfg.espBolts);
+        for (int i = 0; i < bolts; i++) {
+            // Выбираем грань бокса и две точки на ней: молния ползёт по поверхности
+            int axis = rnd.nextInt(3);
+            double fixed = rnd.nextBoolean() ? hi[axis] : lo[axis];
+            Vec3d a = facePoint(rnd, lo, hi, axis, fixed);
+            Vec3d b = facePoint(rnd, lo, hi, axis, fixed);
+            if (a.distanceTo(b) < 0.35) b = facePoint(rnd, lo, hi, axis, fixed);
+
+            int color = 0xFF000000 | (rnd.nextFloat() < 0.4f ? bright : rgb);
+            int segments = 5 + rnd.nextInt(3);
+            Vec3d prev = a;
+            for (int sgm = 1; sgm <= segments; sgm++) {
+                Vec3d next = a.lerp(b, sgm / (double) segments);
+                if (sgm < segments) next = jitter(rnd, next, lo, hi, axis, 0.11);
+                line(entry, lines, prev, next, color);
+
+                // Иногда от излома отходит короткая веточка
+                if (sgm < segments && rnd.nextFloat() < 0.25f) {
+                    Vec3d tip = jitter(rnd, next, lo, hi, axis, 0.22);
+                    line(entry, lines, next, tip, color);
+                }
+                prev = next;
+            }
+        }
+    }
+
+    private static Vec3d facePoint(Random rnd, double[] lo, double[] hi, int axis, double fixed) {
+        double[] v = new double[3];
+        for (int k = 0; k < 3; k++) {
+            v[k] = k == axis ? fixed : lo[k] + (hi[k] - lo[k]) * rnd.nextDouble();
+        }
+        return new Vec3d(v[0], v[1], v[2]);
+    }
+
+    /** Сдвигает точку вдоль плоскости грани (не отрываясь от неё). */
+    private static Vec3d jitter(Random rnd, Vec3d p, double[] lo, double[] hi, int axis, double amount) {
+        double[] v = {p.x, p.y, p.z};
+        for (int k = 0; k < 3; k++) {
+            if (k == axis) continue;
+            v[k] = MathHelper.clamp(v[k] + (rnd.nextDouble() - 0.5) * 2.0 * amount, lo[k], hi[k]);
+        }
+        return new Vec3d(v[0], v[1], v[2]);
+    }
+
+    private static int mixWhite(int rgb, float t) {
+        int r = (int) (((rgb >> 16) & 255) * (1 - t) + 255 * t);
+        int g = (int) (((rgb >> 8) & 255) * (1 - t) + 255 * t);
+        int b = (int) ((rgb & 255) * (1 - t) + 255 * t);
+        return (r << 16) | (g << 8) | b;
+    }
+
+    /** Один отрезок линии (RenderLayer.getLines требует нормаль вдоль линии). */
+    private static void line(MatrixStack.Entry entry, VertexConsumer vc, Vec3d a, Vec3d b, int argb) {
+        double dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (len < 1.0e-6) return;
+        float nx = (float) (dx / len), ny = (float) (dy / len), nz = (float) (dz / len);
+        vc.vertex(entry, (float) a.x, (float) a.y, (float) a.z).color(argb).normal(entry, nx, ny, nz);
+        vc.vertex(entry, (float) b.x, (float) b.y, (float) b.z).color(argb).normal(entry, nx, ny, nz);
     }
 }

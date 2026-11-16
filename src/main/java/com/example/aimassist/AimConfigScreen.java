@@ -3,24 +3,30 @@ package com.example.aimassist;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.TextFieldWidget;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.MathHelper;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.DoubleConsumer;
 import java.util.function.DoubleSupplier;
 import java.util.function.Function;
+import java.util.function.IntConsumer;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
- * Меню в стиле «модульного» клиента: боковая панель с разделами, карточки модулей,
- * поиск по настройкам и настройка цвета оформления.
+ * Меню в стиле «модульного» клиента: боковая панель с иконками, карточки модулей,
+ * выпадающие списки для режимов, поиск по настройкам и настройка цветов.
  */
 public class AimConfigScreen extends Screen {
     // Цвета (ARGB). Акцент берётся из конфига.
@@ -38,9 +44,9 @@ public class AimConfigScreen extends Screen {
     private static final int HEADER_H = 48;
     private static final int CARD_HEAD = 30;
     private static final int GAP = 8;
+    private static final int DROP_ITEM_H = 16;
 
     private static final String[] TAB_TITLES = {"Combat", "Visual"};
-    private static final String[] TAB_SHORT = {"AIM", "UI"};
 
     private static final int[] SWATCHES = {
             0x8B5CF6, 0x4FC3F7, 0x66BB6A, 0xEF5350, 0xFFA726, 0xEC407A
@@ -49,13 +55,27 @@ public class AimConfigScreen extends Screen {
     // Запоминаем вкладку между открытиями меню
     private static int currentTab = 0;
 
+    // Свёрнутые карточки (запоминаем между открытиями меню)
+    private static final Set<String> collapsed = new HashSet<>();
+
     private final Screen parent;
 
-    private final List<Card> modules = new ArrayList<>();
+    // Время между кадрами для анимаций
+    private long lastNanos = System.nanoTime();
+    private float dt = 0.016f;
+
+    private final List<Card> cards = new ArrayList<>();
     private TextFieldWidget searchField;
     private String query = "";
     private double scroll = 0;
     private SliderRow dragging;
+
+    // Открытый выпадающий список
+    private CycleRow<?> drop;
+    private int dropX, dropY, dropW, dropH;
+
+    // Иконки разделов
+    private ItemStack[] tabIcons;
 
     // Геометрия, считается в init()
     private int winX, winY, winW, winH;
@@ -72,6 +92,9 @@ public class AimConfigScreen extends Screen {
     protected void init() {
         AimConfig cfg = AimConfig.INSTANCE;
 
+        tabIcons = new ItemStack[]{new ItemStack(Items.DIAMOND_SWORD), new ItemStack(Items.ENDER_EYE)};
+        drop = null;
+
         winW = Math.min(470, this.width - 16);
         winH = Math.min(330, this.height - 24);
         winX = (this.width - winW) / 2;
@@ -79,12 +102,12 @@ public class AimConfigScreen extends Screen {
         cx0 = winX + SIDEBAR_W + 12;
         cy0 = winY + HEADER_H;
         cw = winW - SIDEBAR_W - 24;
-        ch = winH - HEADER_H - 10;
+        ch = winH - HEADER_H - 24;
 
-        modules.clear();
+        cards.clear();
 
         // ---- Combat ----
-        Card aim = new Card(0, "Aim Assist", "Плавно наводит камеру на ближайшую цель",
+        Card aim = new Card(0, "Aim Assist", "Доводит камеру до центра цели",
                 () -> cfg.enabled, v -> cfg.enabled = v);
         aim.rows.add(new CycleRow<>("Логика", Arrays.asList(AimMode.values()),
                 () -> cfg.mode, v -> cfg.mode = v, m -> m.label));
@@ -94,23 +117,33 @@ public class AimConfigScreen extends Screen {
         aim.rows.add(new SliderRow("Скорость Y (вверх-вниз)", 0.01, 1.0, 2, "", () -> cfg.speedY, v -> cfg.speedY = v));
         aim.rows.add(new SliderRow("Плавность разгона", 0.05, 1.0, 2, "", () -> cfg.accel, v -> cfg.accel = v));
         aim.rows.add(new SliderRow("Макс. поворот за тик", 1, 90, 0, "°", () -> cfg.maxStep, v -> cfg.maxStep = v));
-        aim.rows.add(new CycleRow<>("Целиться в", Arrays.asList(true, false),
-                () -> cfg.aimAtHead, v -> cfg.aimAtHead = v, v -> v ? "Голова" : "Тело"));
         aim.rows.add(new ToggleRow("Только видимые цели", () -> cfg.visibleOnly, v -> cfg.visibleOnly = v));
         aim.rows.add(new ToggleRow("Только при зажатой ЛКМ", () -> cfg.holdAttackOnly, v -> cfg.holdAttackOnly = v));
-        modules.add(aim);
+        cards.add(aim);
 
         Card atk = new Card(0, "Auto Attack", "Бьёт, когда прицел на хитбоксе игрока",
                 () -> cfg.autoAttack, v -> cfg.autoAttack = v);
+        atk.rows.add(new CycleRow<>("Оружие в руке", Arrays.asList(WeaponFilter.values()),
+                () -> cfg.weapon, v -> cfg.weapon = v, w -> w.label));
         atk.rows.add(new ToggleRow("Только полный взмах (100%)", () -> cfg.fullChargeOnly, v -> cfg.fullChargeOnly = v));
         atk.rows.add(new SliderRow("Мин. заряд (если взмах выкл.)", 0.1, 1.0, 2, "", () -> cfg.attackCharge, v -> cfg.attackCharge = v));
         atk.rows.add(new ToggleRow("Только криты", () -> cfg.critOnly, v -> cfg.critOnly = v));
         atk.rows.add(new ToggleRow("Не бить при еде / щите / луке", () -> cfg.noHitWhileUsing, v -> cfg.noHitWhileUsing = v));
-        modules.add(atk);
+        cards.add(atk);
 
         // ---- Visual ----
+        Card esp = new Card(1, "Target ESP", "Обводка игрока, на которого наведён аим",
+                () -> cfg.espEnabled, v -> cfg.espEnabled = v);
+        esp.rows.add(new CycleRow<>("Стиль", Arrays.asList(EspStyle.values()),
+                () -> cfg.espStyle, v -> cfg.espStyle = v, e -> e.label));
+        esp.rows.add(new ToggleRow("Рамка вокруг цели", () -> cfg.espFrame, v -> cfg.espFrame = v));
+        esp.rows.add(new SliderRow("Скорость эффекта", 0.2, 3.0, 1, "", () -> cfg.espSpeed, v -> cfg.espSpeed = v));
+        esp.rows.add(new SliderRow("Количество молний", 1, 14, 0, "", () -> cfg.espBolts, v -> cfg.espBolts = (int) v));
+        esp.rows.add(new SwatchRow("Цвет обводки", () -> cfg.espColor, v -> cfg.espColor = v));
+        cards.add(esp);
+
         Card theme = new Card(1, "Оформление", "Цвет и прозрачность меню", null, null);
-        theme.rows.add(new SwatchRow("Цвет акцента"));
+        theme.rows.add(new SwatchRow("Цвет акцента", () -> cfg.accent, v -> cfg.accent = v));
         theme.rows.add(new SliderRow("Красный", 0, 255, 0, "", () -> (cfg.accent >> 16) & 255,
                 v -> cfg.accent = (cfg.accent & 0x00FFFF) | ((int) v << 16)));
         theme.rows.add(new SliderRow("Зелёный", 0, 255, 0, "", () -> (cfg.accent >> 8) & 255,
@@ -118,12 +151,12 @@ public class AimConfigScreen extends Screen {
         theme.rows.add(new SliderRow("Синий", 0, 255, 0, "", () -> cfg.accent & 255,
                 v -> cfg.accent = (cfg.accent & 0xFFFF00) | (int) v));
         theme.rows.add(new SliderRow("Прозрачность окна", 0.3, 1.0, 2, "", () -> cfg.windowOpacity, v -> cfg.windowOpacity = v));
-        modules.add(theme);
+        cards.add(theme);
 
         // ---- Поиск ----
         int sw = 140;
         int sx = winX + winW - 12 - sw;
-        int sy = winY + 14;
+        int sy = winY + 12;
         searchField = new TextFieldWidget(this.textRenderer, sx + 6, sy + 4, sw - 12, 12, Text.literal("Поиск"));
         searchField.setDrawsBackground(false);
         searchField.setMaxLength(32);
@@ -132,11 +165,12 @@ public class AimConfigScreen extends Screen {
         searchField.setChangedListener(s -> {
             query = s;
             scroll = 0;
+            drop = null;
         });
         addDrawableChild(searchField);
     }
 
-    // ------------------------------------------------------------------ отрисовка
+    // ------------------------------------------------------------------ рисование примитивов
 
     private int accent() {
         return 0xFF000000 | (AimConfig.INSTANCE.accent & 0xFFFFFF);
@@ -146,11 +180,58 @@ public class AimConfigScreen extends Screen {
         return (alpha << 24) | (AimConfig.INSTANCE.accent & 0xFFFFFF);
     }
 
-    /** Какие модули показывать сейчас (с учётом вкладки и поиска). */
-    private List<Card> visibleModules() {
+    /** Прямоугольник со срезанными углами (выглядит скруглённым). */
+    private static void rect(DrawContext c, int x, int y, int w, int h, int color) {
+        c.fill(x + 1, y, x + w - 1, y + h, color);
+        c.fill(x, y + 1, x + 1, y + h - 1, color);
+        c.fill(x + w - 1, y + 1, x + w, y + h - 1, color);
+    }
+
+    /** Скруглённый блок с рамкой. */
+    private static void box(DrawContext c, int x, int y, int w, int h, int fill, int border) {
+        rect(c, x, y, w, h, border);
+        rect(c, x + 1, y + 1, w - 2, h - 2, fill);
+    }
+
+    /** t = 0 (выкл) .. 1 (вкл), плавно меняется со временем. */
+    private void drawSwitch(DrawContext ctx, int x, int y, float t) {
+        if (t > 0.02f) rect(ctx, x - 1, y - 1, 24, 12, accentAlpha((int) (0x30 * t)));
+        rect(ctx, x, y, 22, 10, lerpColor(OFF, accent(), t));
+        rect(ctx, x + 1 + Math.round(t * 12), y + 1, 8, 8, 0xFFFFFFFF);
+    }
+
+    private float approach(float current, float target) {
+        return current + (target - current) * Math.min(1f, dt * 16f);
+    }
+
+    private static int lerpColor(int a, int b, float t) {
+        int out = 0;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            int ca = (a >> shift) & 255, cb = (b >> shift) & 255;
+            out |= ((int) (ca + (cb - ca) * t) & 255) << shift;
+        }
+        return out;
+    }
+
+    private void drawChevronRight(DrawContext ctx, int x, int y, int color) {
+        for (int i = 0; i < 3; i++) {
+            ctx.fill(x + i, y + i, x + i + 1, y + 5 - i, color);
+        }
+    }
+
+    private void drawChevron(DrawContext ctx, int x, int y, int color) {
+        for (int i = 0; i < 3; i++) {
+            ctx.fill(x + i, y + i, x + 5 - i, y + i + 1, color);
+        }
+    }
+
+    // ------------------------------------------------------------------ отрисовка
+
+    /** Какие карточки показывать сейчас (с учётом вкладки и поиска). */
+    private List<Card> visibleCards() {
         String q = query.trim().toLowerCase(Locale.ROOT);
         List<Card> out = new ArrayList<>();
-        for (Card m : modules) {
+        for (Card m : cards) {
             if (q.isEmpty()) {
                 if (m.tab != currentTab) continue;
                 m.shown = m.rows;
@@ -174,44 +255,70 @@ public class AimConfigScreen extends Screen {
         // Фон рисуем сами в render(), стандартное размытие не нужно
     }
 
+    private int tabY(int i) {
+        return winY + 48 + i * 36;
+    }
+
     @Override
     public void render(DrawContext ctx, int mx, int my, float delta) {
         AimConfig cfg = AimConfig.INSTANCE;
+        long now = System.nanoTime();
+        dt = Math.min((now - lastNanos) / 1_000_000_000f, 0.05f);
+        lastNanos = now;
+
         int alpha = (int) (MathHelper.clamp(cfg.windowOpacity, 0.3, 1.0) * 255);
 
-        // Затемнение и окно
+        // Затемнение, тень и окно
         ctx.fill(0, 0, this.width, this.height, 0x88000000);
-        ctx.fill(winX, winY, winX + winW, winY + winH, (alpha << 24) | 0x0F1014);
-        ctx.fill(winX, winY, winX + SIDEBAR_W, winY + winH, (alpha << 24) | 0x0A0B0E);
-        ctx.drawBorder(winX, winY, winW, winH, BORDER);
-        ctx.fill(winX + SIDEBAR_W, winY, winX + SIDEBAR_W + 1, winY + winH, BORDER);
+        for (int i = 6; i >= 1; i--) {
+            rect(ctx, winX - i, winY - i, winW + i * 2, winH + i * 2, 0x10000000);
+        }
+        box(ctx, winX, winY, winW, winH, (alpha << 24) | 0x0F1014, BORDER);
+        ctx.fillGradient(winX + 1, winY + 1, winX + winW - 1, winY + 34, accentAlpha(0x22), 0x00000000);
+        rect(ctx, winX + 1, winY + 1, SIDEBAR_W - 1, winH - 2, (alpha << 24) | 0x0A0B0E);
+        ctx.fill(winX + SIDEBAR_W, winY + 1, winX + SIDEBAR_W + 1, winY + winH - 1, BORDER);
 
-        // Боковая панель
+        // Логотип
+        rect(ctx, winX + 8, winY + 10, 28, 28, accent());
+        ctx.drawCenteredTextWithShadow(this.textRenderer, Text.literal("A").formatted(Formatting.BOLD),
+                winX + 22, winY + 20, TEXT);
+
+        // Боковая панель с иконками
+        int hoverTab = -1;
         for (int i = 0; i < TAB_TITLES.length; i++) {
-            int bx = winX + 6, by = winY + 12 + i * 36, bw = SIDEBAR_W - 12, bh = 30;
-            boolean active = i == currentTab && query.isEmpty();
+            int bx = winX + 6, by = tabY(i), bw = SIDEBAR_W - 12, bh = 30;
+            boolean active = i == currentTab && query.trim().isEmpty();
             boolean hover = mx >= bx && mx < bx + bw && my >= by && my < by + bh;
+            if (hover) hoverTab = i;
             if (active) {
-                ctx.fill(bx, by, bx + bw, by + bh, accentAlpha(0x33));
-                ctx.fill(bx, by, bx + 2, by + bh, accent());
+                rect(ctx, bx, by, bw, bh, accentAlpha(0x33));
+                ctx.fill(bx, by + 4, bx + 2, by + bh - 4, accent());
             } else if (hover) {
-                ctx.fill(bx, by, bx + bw, by + bh, 0x22FFFFFF);
+                rect(ctx, bx, by, bw, bh, 0x22FFFFFF);
             }
-            ctx.drawCenteredTextWithShadow(this.textRenderer, TAB_SHORT[i], bx + bw / 2, by + 11,
-                    active ? TEXT : MUTED);
+            ctx.drawItem(tabIcons[i], bx + (bw - 16) / 2, by + 7);
         }
 
-        // Шапка
-        List<Card> vis = visibleModules();
+        // Шапка: крупный заголовок
+        List<Card> vis = visibleCards();
         String title = query.trim().isEmpty() ? TAB_TITLES[currentTab] : "Поиск";
-        ctx.drawTextWithShadow(this.textRenderer, Text.literal(title).formatted(Formatting.BOLD),
-                winX + SIDEBAR_W + 14, winY + 12, TEXT);
+        ctx.getMatrices().push();
+        ctx.getMatrices().translate(winX + SIDEBAR_W + 14, winY + 10, 0);
+        ctx.getMatrices().scale(1.4f, 1.4f, 1f);
+        ctx.drawTextWithShadow(this.textRenderer, Text.literal(title).formatted(Formatting.BOLD), 0, 0, TEXT);
+        ctx.getMatrices().pop();
         ctx.drawTextWithShadow(this.textRenderer, vis.size() + " " + plural(vis.size()),
-                winX + SIDEBAR_W + 14, winY + 25, MUTED);
+                winX + SIDEBAR_W + 14, winY + 27, MUTED);
+        ctx.fill(winX + SIDEBAR_W + 1, winY + HEADER_H - 6, winX + winW - 1, winY + HEADER_H - 5, BORDER);
 
-        int sw = 140, sx = winX + winW - 12 - sw, sy = winY + 14;
-        ctx.fill(sx, sy, sx + sw, sy + 18, FIELD);
-        ctx.drawBorder(sx, sy, sw, 18, searchField.isFocused() ? accent() : BORDER);
+        int sw = 140, sx = winX + winW - 12 - sw, sy = winY + 12;
+        box(ctx, sx, sy, sw, 20, FIELD, searchField.isFocused() ? accent() : BORDER);
+
+        // Строка-подсказка внизу окна
+        ctx.fill(winX + SIDEBAR_W + 1, winY + winH - 20, winX + winW - 1, winY + winH - 19, BORDER);
+        ctx.drawCenteredTextWithShadow(this.textRenderer,
+                "R — вкл/выкл · Right Shift — меню · клик по заголовку — свернуть",
+                winX + SIDEBAR_W + (winW - SIDEBAR_W) / 2, winY + winH - 14, MUTED);
 
         // Раскладка карточек в две колонки
         int colW = (cw - GAP) / 2;
@@ -230,7 +337,7 @@ public class AimConfigScreen extends Screen {
         // Карточки (с обрезкой по области контента)
         ctx.enableScissor(cx0, cy0, cx0 + cw + 4, cy0 + ch);
         for (Card m : vis) {
-            drawModule(ctx, m, cx0 + m.px, cy0 + m.py - (int) scroll, mx, my);
+            drawCard(ctx, m, cx0 + m.px, cy0 + m.py - (int) scroll, mx, my);
         }
         ctx.disableScissor();
 
@@ -246,12 +353,22 @@ public class AimConfigScreen extends Screen {
             ctx.fill(cx0 + cw + 3, barY, cx0 + cw + 5, barY + barH, accentAlpha(0xAA));
         }
 
-        // Поле поиска поверх своей подложки
+        // Поле поиска
         super.render(ctx, mx, my, delta);
 
-        ctx.drawCenteredTextWithShadow(this.textRenderer,
-                "R — вкл/выкл · Right Shift — это меню · колесо — прокрутка",
-                this.width / 2, winY + winH + 6, MUTED);
+        // Подпись раздела при наведении на иконку
+        if (hoverTab >= 0 && drop == null) {
+            int tw = this.textRenderer.getWidth(TAB_TITLES[hoverTab]) + 12;
+            ctx.getMatrices().push();
+            ctx.getMatrices().translate(0, 0, 300);
+            box(ctx, winX + SIDEBAR_W + 6, tabY(hoverTab) + 7, tw, 16, 0xFF12141A, accent());
+            ctx.drawTextWithShadow(this.textRenderer, TAB_TITLES[hoverTab],
+                    winX + SIDEBAR_W + 12, tabY(hoverTab) + 11, TEXT);
+            ctx.getMatrices().pop();
+        }
+
+        // Выпадающий список рисуем поверх всего
+        if (drop != null) drawDropdown(ctx, mx, my);
     }
 
     private static String plural(int n) {
@@ -261,38 +378,87 @@ public class AimConfigScreen extends Screen {
         return "модулей";
     }
 
-    private void drawModule(DrawContext ctx, Card m, int x, int y, int mx, int my) {
+    private boolean isCollapsed(Card m) {
+        return query.trim().isEmpty() && collapsed.contains(m.name);
+    }
+
+    private void drawCard(DrawContext ctx, Card m, int x, int y, int mx, int my) {
         int w = m.pw;
         int h = m.height();
-        ctx.fill(x, y, x + w, y + h, CARD);
-        ctx.drawBorder(x, y, w, h, BORDER);
+        m.sx = x;
+        m.sy = y;
 
-        ctx.drawTextWithShadow(this.textRenderer, Text.literal(m.name).formatted(Formatting.BOLD),
-                x + 8, y + 6, TEXT);
-        int descW = w - 16 - (m.on != null ? 28 : 0);
-        ctx.drawTextWithShadow(this.textRenderer, this.textRenderer.trimToWidth(m.desc, descW),
-                x + 8, y + 17, MUTED);
-
-        if (m.on != null) {
-            m.tx = x + w - 8 - 20;
-            m.ty = y + 9;
-            drawSwitch(ctx, m.tx, m.ty, m.on.getAsBoolean());
+        box(ctx, x, y, w, h, CARD, BORDER);
+        boolean enabled = m.on == null || m.on.getAsBoolean();
+        ctx.fillGradient(x + 1, y + 1, x + w - 1, y + CARD_HEAD - 2, accentAlpha(enabled ? 0x1E : 0x08), 0x00000000);
+        if (m.on != null && enabled) {
+            ctx.fill(x, y + 6, x + 2, y + CARD_HEAD - 6, accent()); // метка включённого модуля
         }
 
+        ctx.drawTextWithShadow(this.textRenderer, Text.literal(m.name).formatted(Formatting.BOLD),
+                x + 9, y + 6, TEXT);
+        int descW = w - 18 - (m.on != null ? 52 : 18);
+        ctx.drawTextWithShadow(this.textRenderer, this.textRenderer.trimToWidth(m.desc, descW),
+                x + 9, y + 17, MUTED);
+
+        // Стрелка сворачивания
+        int cxr = x + w - 12 - (m.on != null ? 30 : 0);
+        if (isCollapsed(m)) drawChevronRight(ctx, cxr + 1, y + 11, MUTED);
+        else drawChevron(ctx, cxr - 1, y + 12, MUTED);
+
+        if (m.on != null) {
+            m.t = m.t < 0 ? (enabled ? 1f : 0f) : approach(m.t, enabled ? 1f : 0f);
+            m.tx = x + w - 8 - 22;
+            m.ty = y + 9;
+            drawSwitch(ctx, m.tx, m.ty, m.t);
+        }
+
+        if (isCollapsed(m)) return;
+
+        ctx.fill(x + 8, y + CARD_HEAD - 2, x + w - 8, y + CARD_HEAD - 1, BORDER);
         int ry = y + CARD_HEAD;
         for (Row r : m.shown) {
             r.x = x + 8;
             r.y = ry;
             r.w = w - 16;
+            if (r.hit(mx, my)) rect(ctx, r.x - 4, r.y, r.w + 8, r.height(), 0x0DFFFFFF);
             r.draw(ctx, mx, my);
             ry += r.height();
         }
     }
 
-    private void drawSwitch(DrawContext ctx, int x, int y, boolean on) {
-        ctx.fill(x, y, x + 20, y + 10, on ? accent() : OFF);
-        int kx = on ? x + 20 - 8 : x + 2;
-        ctx.fill(kx, y + 2, kx + 6, y + 8, 0xFFFFFFFF);
+    private void drawDropdown(DrawContext ctx, int mx, int my) {
+        List<String> labels = drop.labels();
+        int selected = drop.index();
+
+        int maxText = 0;
+        for (String s : labels) maxText = Math.max(maxText, this.textRenderer.getWidth(s));
+        dropW = Math.max(Math.max(100, drop.boxW()), maxText + 28);
+        dropH = labels.size() * DROP_ITEM_H + 6;
+        dropX = drop.x + drop.w - dropW;
+        dropY = drop.y + 20;
+        if (dropY + dropH > this.height - 4) dropY = drop.y + 2 - dropH; // открываем вверх, если не помещается
+
+        ctx.getMatrices().push();
+        ctx.getMatrices().translate(0, 0, 400);
+
+        for (int i = 4; i >= 1; i--) rect(ctx, dropX - i, dropY - i, dropW + i * 2, dropH + i * 2, 0x14000000);
+        box(ctx, dropX, dropY, dropW, dropH, 0xFF12141A, accentAlpha(0xFF));
+        for (int i = 0; i < labels.size(); i++) {
+            int iy = dropY + 3 + i * DROP_ITEM_H;
+            boolean hover = mx >= dropX + 3 && mx < dropX + dropW - 3 && my >= iy && my < iy + DROP_ITEM_H;
+            boolean sel = i == selected;
+            if (sel) {
+                rect(ctx, dropX + 3, iy, dropW - 6, DROP_ITEM_H, accentAlpha(0x40));
+                ctx.fill(dropX + 3, iy + 3, dropX + 5, iy + DROP_ITEM_H - 3, accent());
+            } else if (hover) {
+                rect(ctx, dropX + 3, iy, dropW - 6, DROP_ITEM_H, 0x22FFFFFF);
+            }
+            ctx.drawTextWithShadow(this.textRenderer, labels.get(i), dropX + 11, iy + 4,
+                    sel || hover ? TEXT : TEXT_DIM);
+        }
+
+        ctx.getMatrices().pop();
     }
 
     // ------------------------------------------------------------------ ввод
@@ -303,12 +469,24 @@ public class AimConfigScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mx, double my, int button) {
+        // Открытый список перехватывает клик первым
+        if (drop != null) {
+            CycleRow<?> d = drop;
+            drop = null;
+            if (mx >= dropX && mx < dropX + dropW && my >= dropY && my < dropY + dropH) {
+                int i = (int) ((my - dropY - 3) / DROP_ITEM_H);
+                if (i >= 0 && i < d.labels().size()) d.select(i);
+                return true;
+            }
+            if (d.hit(mx, my)) return true; // повторный клик по строке просто закрывает список
+        }
+
         if (super.mouseClicked(mx, my, button)) return true;
         searchField.setFocused(false);
 
         // Боковая панель
         for (int i = 0; i < TAB_TITLES.length; i++) {
-            int bx = winX + 6, by = winY + 12 + i * 36, bw = SIDEBAR_W - 12, bh = 30;
+            int bx = winX + 6, by = tabY(i), bw = SIDEBAR_W - 12, bh = 30;
             if (mx >= bx && mx < bx + bw && my >= by && my < by + bh && button == 0) {
                 currentTab = i;
                 scroll = 0;
@@ -319,12 +497,19 @@ public class AimConfigScreen extends Screen {
 
         if (!inContent(mx, my)) return false;
 
-        for (Card m : visibleModules()) {
+        for (Card m : visibleCards()) {
             if (m.on != null && button == 0
-                    && mx >= m.tx - 2 && mx < m.tx + 22 && my >= m.ty - 2 && my < m.ty + 12) {
+                    && mx >= m.tx - 2 && mx < m.tx + 24 && my >= m.ty - 2 && my < m.ty + 12) {
                 m.setOn.accept(!m.on.getAsBoolean());
                 return true;
             }
+            // Клик по заголовку сворачивает / разворачивает карточку
+            if (button == 0 && query.trim().isEmpty()
+                    && mx >= m.sx && mx < m.sx + m.pw && my >= m.sy && my < m.sy + CARD_HEAD) {
+                if (!collapsed.remove(m.name)) collapsed.add(m.name);
+                return true;
+            }
+            if (isCollapsed(m)) continue;
             for (Row r : m.shown) {
                 if (r.click(mx, my, button)) return true;
             }
@@ -350,6 +535,7 @@ public class AimConfigScreen extends Screen {
     @Override
     public boolean mouseScrolled(double mx, double my, double horizontal, double vertical) {
         if (inContent(mx, my)) {
+            drop = null;
             scroll -= vertical * 20;
             return true;
         }
@@ -382,6 +568,8 @@ public class AimConfigScreen extends Screen {
         List<Row> shown = rows;
         int px, py, pw;                // положение в области контента
         int tx, ty;                    // положение переключателя на экране
+        int sx, sy;                    // положение карточки на экране
+        float t = -1f;                 // анимация переключателя
 
         Card(int tab, String name, String desc, BooleanSupplier on, Consumer<Boolean> setOn) {
             this.tab = tab;
@@ -392,6 +580,7 @@ public class AimConfigScreen extends Screen {
         }
 
         int height() {
+            if (isCollapsed(this)) return CARD_HEAD;
             int h = CARD_HEAD + 4;
             for (Row r : shown) h += r.height();
             return h;
@@ -415,13 +604,15 @@ public class AimConfigScreen extends Screen {
         }
 
         boolean hit(double mx, double my) {
-            return mx >= x && mx < x + w && my >= y && my < y + height() && inContent(mx, my);
+            return mx >= x && mx < x + w && my >= y && my < y + height() && inContent(mx, my)
+                    && drop == null;
         }
     }
 
     private final class ToggleRow extends Row {
         final BooleanSupplier get;
         final Consumer<Boolean> set;
+        float t = -1f;
 
         ToggleRow(String label, BooleanSupplier get, Consumer<Boolean> set) {
             super(label);
@@ -436,8 +627,10 @@ public class AimConfigScreen extends Screen {
 
         @Override
         void draw(DrawContext ctx, int mx, int my) {
+            boolean on = get.getAsBoolean();
+            t = t < 0 ? (on ? 1f : 0f) : approach(t, on ? 1f : 0f);
             ctx.drawTextWithShadow(textRenderer, label, x, y + 6, hit(mx, my) ? TEXT : TEXT_DIM);
-            drawSwitch(ctx, x + w - 20, y + 5, get.getAsBoolean());
+            drawSwitch(ctx, x + w - 22, y + 5, t);
         }
 
         @Override
@@ -476,17 +669,26 @@ public class AimConfigScreen extends Screen {
         @Override
         void draw(DrawContext ctx, int mx, int my) {
             double v = get.getAsDouble();
-            String value = (decimals == 0 ? String.valueOf(Math.round(v)) : String.format(Locale.ROOT, "%." + decimals + "f", v)) + suffix;
+            String value = (decimals == 0 ? String.valueOf(Math.round(v))
+                    : String.format(Locale.ROOT, "%." + decimals + "f", v)) + suffix;
 
             ctx.drawTextWithShadow(textRenderer, label, x, y + 3, hit(mx, my) || dragging == this ? TEXT : TEXT_DIM);
-            ctx.drawTextWithShadow(textRenderer, value, x + w - textRenderer.getWidth(value), y + 3, TEXT);
+            int vw = textRenderer.getWidth(value) + 8;
+            box(ctx, x + w - vw, y, vw, 13, FIELD, BORDER);
+            ctx.drawTextWithShadow(textRenderer, value, x + w - vw + 4, y + 3, TEXT);
 
             double t = MathHelper.clamp((v - min) / (max - min), 0, 1);
             int ty = y + 17;
             int fw = (int) (w * t);
-            ctx.fill(x, ty, x + w, ty + 2, TRACK);
-            ctx.fill(x, ty, x + fw, ty + 2, accent());
-            ctx.fill(x + fw - 2, ty - 2, x + fw + 2, ty + 4, 0xFFFFFFFF);
+            boolean active = dragging == this || (hit(mx, my) && my >= y + 9);
+
+            rect(ctx, x, ty, w, 4, TRACK);
+            if (fw > 0) {
+                rect(ctx, x, ty, Math.max(fw, 3), 4, accent());
+                ctx.fill(x + 1, ty, x + Math.max(fw, 3) - 1, ty + 1, lerpColor(accent(), 0xFFFFFFFF, 0.35f));
+            }
+            if (active) rect(ctx, x + fw - 6, ty - 4, 12, 12, accentAlpha(0x40)); // свечение
+            rect(ctx, x + fw - 3, ty - 2, 6, 8, 0xFFFFFFFF);
         }
 
         @Override
@@ -507,6 +709,7 @@ public class AimConfigScreen extends Screen {
         }
     }
 
+    /** Строка с выпадающим списком: по клику открывается список всех значений. */
     private final class CycleRow<T> extends Row {
         final List<T> values;
         final Supplier<T> get;
@@ -521,28 +724,45 @@ public class AimConfigScreen extends Screen {
             this.name = name;
         }
 
+        List<String> labels() {
+            List<String> out = new ArrayList<>();
+            for (T v : values) out.add(name.apply(v));
+            return out;
+        }
+
+        int index() {
+            return Math.max(0, values.indexOf(get.get()));
+        }
+
+        void select(int i) {
+            set.accept(values.get(i));
+        }
+
+        int boxW() {
+            return Math.max(72, textRenderer.getWidth(name.apply(get.get())) + 26);
+        }
+
         @Override
         int height() {
-            return 20;
+            return 22;
         }
 
         @Override
         void draw(DrawContext ctx, int mx, int my) {
-            ctx.drawTextWithShadow(textRenderer, label, x, y + 6, hit(mx, my) ? TEXT : TEXT_DIM);
+            boolean hover = hit(mx, my) || drop == this;
+            ctx.drawTextWithShadow(textRenderer, label, x, y + 7, hover ? TEXT : TEXT_DIM);
             String s = name.apply(get.get());
-            int bw = Math.max(64, textRenderer.getWidth(s) + 16);
+            int bw = boxW();
             int bx = x + w - bw;
-            ctx.fill(bx, y + 2, x + w, y + 18, FIELD);
-            ctx.drawBorder(bx, y + 2, bw, 16, BORDER);
-            ctx.drawCenteredTextWithShadow(textRenderer, s, bx + bw / 2, y + 6, TEXT);
+            box(ctx, bx, y + 2, bw, 18, FIELD, drop == this ? accent() : BORDER);
+            ctx.drawTextWithShadow(textRenderer, s, bx + 7, y + 7, TEXT);
+            drawChevron(ctx, bx + bw - 11, y + 9, drop == this ? accent() : MUTED);
         }
 
         @Override
         boolean click(double mx, double my, int button) {
-            if ((button == 0 || button == 1) && hit(mx, my)) {
-                int i = values.indexOf(get.get());
-                int step = button == 0 ? 1 : -1;
-                set.accept(values.get(Math.floorMod(i + step, values.size())));
+            if (button == 0 && hit(mx, my)) {
+                drop = this;
                 return true;
             }
             return false;
@@ -550,8 +770,13 @@ public class AimConfigScreen extends Screen {
     }
 
     private final class SwatchRow extends Row {
-        SwatchRow(String label) {
+        final IntSupplier get;
+        final IntConsumer set;
+
+        SwatchRow(String label, IntSupplier get, IntConsumer set) {
             super(label);
+            this.get = get;
+            this.set = set;
         }
 
         @Override
@@ -568,8 +793,8 @@ public class AimConfigScreen extends Screen {
             ctx.drawTextWithShadow(textRenderer, label, x, y + 8, TEXT_DIM);
             for (int i = 0; i < SWATCHES.length; i++) {
                 int sx = swatchX(i);
-                ctx.fill(sx, y + 6, sx + 12, y + 18, 0xFF000000 | SWATCHES[i]);
-                if ((AimConfig.INSTANCE.accent & 0xFFFFFF) == SWATCHES[i]) {
+                rect(ctx, sx, y + 6, 12, 12, 0xFF000000 | SWATCHES[i]);
+                if ((get.getAsInt() & 0xFFFFFF) == SWATCHES[i]) {
                     ctx.drawBorder(sx - 1, y + 5, 14, 14, 0xFFFFFFFF);
                 }
             }
@@ -581,7 +806,7 @@ public class AimConfigScreen extends Screen {
             for (int i = 0; i < SWATCHES.length; i++) {
                 int sx = swatchX(i);
                 if (mx >= sx && mx < sx + 12) {
-                    AimConfig.INSTANCE.accent = SWATCHES[i];
+                    set.accept(SWATCHES[i]);
                     return true;
                 }
             }

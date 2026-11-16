@@ -24,14 +24,22 @@ public class AimConfig {
     public double speedX = 0.30;       // скорость по горизонтали (влево-вправо), 0.01 .. 1.0
     public double speedY = 0.30;       // скорость по вертикали (вверх-вниз), 0.01 .. 1.0
     public double maxStep = 20.0;      // максимум градусов за тик
-    public boolean aimAtHead = true;   // true = голова, false = центр тела
     public boolean visibleOnly = true; // только цели в прямой видимости
     public boolean holdAttackOnly = false; // наводиться только при зажатой ЛКМ
     public boolean autoAttack = false;     // бить, когда прицел на хитбоксе игрока
+    public WeaponFilter weapon = WeaponFilter.ANY; // с каким оружием в руке бить
     public boolean fullChargeOnly = true;  // только полностью заряженный удар (полный взмах)
     public double attackCharge = 0.9;      // мин. заряд, если fullChargeOnly выключен (0.1 .. 1.0)
     public boolean critOnly = false;       // бить только критическим ударом (падение, не на земле)
     public boolean noHitWhileUsing = true; // не бить, пока ешь / пьёшь / держишь щит / натягиваешь лук
+
+    // Обводка цели (ESP)
+    public boolean espEnabled = true;
+    public EspStyle espStyle = EspStyle.PULSE;
+    public boolean espFrame = true;        // базовая рамка вокруг цели
+    public double espSpeed = 1.0;          // скорость эффекта
+    public int espBolts = 6;               // количество молний (для стиля «Молнии»)
+    public int espColor = 0x4FC3F7;        // RGB
 
     // Оформление меню
     public int accent = 0x8B5CF6;          // цвет акцента RGB
