@@ -16,6 +16,9 @@ import net.minecraft.client.util.InputUtil;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -47,6 +50,7 @@ public class AimAssistClient implements ClientModInitializer {
 
     // Умный режим автоудара: сколько тиков уже ждём падения ради крита, и пауза между подсказками
     private int smartWait;
+    private boolean smartCritReady; // умный режим дождался момента для крита или удара булавы
     private int statusCooldown;
 
     // Клавиша автоудара
@@ -315,6 +319,10 @@ public class AimAssistClient implements ClientModInitializer {
 
         // Заряд оружия: полный взмах или заданный минимум
         float needCharge = cfg.fullChargeOnly ? 1.0f : (float) cfg.attackCharge;
+        // Крит в ваниле требует заряд выше 90%, поэтому при намерении крита не бьём раньше 95%
+        boolean critIntent = cfg.attackMode == AttackMode.SMART && wantsCrit(client, me, cfg);
+        if (critIntent) needCharge = Math.max(needCharge, 0.95f);
+        smartCritReady = false;
         float charge = me.getAttackCooldownProgress(0.5f);
         if (charge < needCharge) {
             status(me, "заряд удара " + Math.round(charge * 100) + "%");
@@ -322,12 +330,18 @@ public class AimAssistClient implements ClientModInitializer {
         }
 
         // Умный режим: решает, бить сразу (комбо) или подождать падения (крит)
-        if (cfg.attackMode == AttackMode.SMART && !smartAllows(client, me, cfg)) return;
+        if (cfg.attackMode == AttackMode.SMART && !smartAllows(client, me, cfg, critIntent)) return;
 
         // Только крит: падаем, не на земле, не в воде, не на лестнице, не в спринте
-        if (cfg.critOnly && !canCrit(me)) {
+        if (cfg.critOnly && !(fallingForCrit(me) && (!me.isSprinting() || cfg.critStopSprint))) {
             status(me, "жду крит (только криты)");
             return;
+        }
+
+        // Спринт отменяет крит: перед ударом шлём серверу «стоп спринт», пакеты идут по порядку
+        if (cfg.critStopSprint && me.isSprinting() && fallingForCrit(me) && (smartCritReady || cfg.critOnly)) {
+            me.networkHandler.sendPacket(new ClientCommandC2SPacket(me, ClientCommandC2SPacket.Mode.STOP_SPRINTING));
+            me.setSprinting(false);
         }
 
         client.interactionManager.attackEntity(me, victim);
@@ -339,21 +353,44 @@ public class AimAssistClient implements ClientModInitializer {
         status(me, "удар отправлен: " + victim.getName().getString());
     }
 
-    /**
-     * Умный режим. Намерение игрока определяется по его действиям:
-     *  - на земле без прыжка, или в спринте: идёт комбо, бьём сразу, как зарядился взмах;
-     *  - зажат прыжок или игрок в воздухе (не в спринте): идёт крит, ждём падения
-     *    (удар на подъёме не критует и зря сбрасывает заряд). Если крит не дождались за
-     *    заданное число тиков, бьём обычным ударом.
-     */
-    private boolean smartAllows(MinecraftClient client, ClientPlayerEntity me, AimConfig cfg) {
+    /** Игрок хочет бить с прыжка: зажат прыжок или он в воздухе (спринт мешает, если сброс спринта выключен). */
+    private static boolean wantsCrit(MinecraftClient client, ClientPlayerEntity me, AimConfig cfg) {
         boolean jumpHeld = client.options.jumpKey.isPressed();
         boolean airborne = !me.isOnGround() && !me.isClimbing() && !me.isTouchingWater() && !me.hasVehicle();
-        boolean wantsCrit = (jumpHeld || airborne) && !me.isSprinting();
+        if (!jumpHeld && !airborne) return false;
+        return !me.isSprinting() || cfg.critStopSprint;
+    }
 
-        if (!wantsCrit || canCrit(me)) {
+    /**
+     * Умный режим. Намерение игрока определяется по его действиям:
+     *  - на земле без прыжка: идёт комбо, бьём сразу, как зарядился взмах;
+     *  - зажат прыжок или игрок в воздухе: идёт крит, ждём падения (удар на подъёме не критует
+     *    и зря сбрасывает заряд). Если игрок в спринте, спринт сбрасывается прямо перед ударом;
+     *  - с булавой ждём удара с высоты (падение больше 1.5 блока), если под ногами есть куда падать.
+     * Если момент не дождались за заданное число тиков, бьём обычным ударом.
+     */
+    private boolean smartAllows(MinecraftClient client, ClientPlayerEntity me, AimConfig cfg, boolean critIntent) {
+        if (!critIntent) {
             smartWait = 0;
-            return true; // комбо или крит уже готов
+            return true; // комбо
+        }
+
+        boolean falling = fallingForCrit(me);
+        boolean ready = falling;
+        String waitText = "умный режим: жду падения для крита";
+
+        if (me.getMainHandStack().isOf(Items.MACE) && !me.isOnGround()) {
+            boolean smash = me.fallDistance > 1.5f;
+            // Если падать ещё достаточно далеко, ждём удара булавой, иначе довольствуемся критом
+            boolean canSmashLater = me.fallDistance + dropBelow(client, me) > 1.6;
+            ready = smash || (falling && !canSmashLater);
+            waitText = "булава: жду удар с высоты";
+        }
+
+        if (ready) {
+            smartWait = 0;
+            smartCritReady = true;
+            return true;
         }
 
         smartWait++;
@@ -362,8 +399,17 @@ public class AimAssistClient implements ClientModInitializer {
             status(me, "крит не дождался, бью обычным");
             return true;
         }
-        status(me, "умный режим: жду падения для крита");
+        status(me, waitText);
         return false;
+    }
+
+    /** Сколько блоков до земли под ногами (до 64). */
+    private static double dropBelow(MinecraftClient client, ClientPlayerEntity me) {
+        Vec3d from = me.getPos();
+        Vec3d to = from.subtract(0, 64, 0);
+        BlockHitResult res = client.world.raycast(new RaycastContext(
+                from, to, RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, me));
+        return res.getType() == HitResult.Type.MISS ? 64.0 : from.y - res.getPos().y;
     }
 
     /** Короткое сообщение над хотбаром о том, почему автоудар сейчас не бьёт (раз в полсекунды). */
@@ -379,17 +425,23 @@ public class AimAssistClient implements ClientModInitializer {
             case ANY -> true;
             case SWORD -> stack.isIn(ItemTags.SWORDS);
             case SWORD_AXE -> stack.isIn(ItemTags.SWORDS) || stack.isIn(ItemTags.AXES);
+            case SWORD_AXE_MACE -> stack.isIn(ItemTags.SWORDS) || stack.isIn(ItemTags.AXES) || stack.isOf(Items.MACE);
+            case MACE -> stack.isOf(Items.MACE);
         };
     }
 
     /** Условия критического удара в ванильной механике. */
     private static boolean canCrit(ClientPlayerEntity me) {
+        return fallingForCrit(me) && !me.isSprinting();
+    }
+
+    /** Все условия крита, кроме спринта (его можно сбросить перед ударом). */
+    private static boolean fallingForCrit(ClientPlayerEntity me) {
         return me.fallDistance > 0.0F
                 && !me.isOnGround()
                 && !me.isClimbing()
                 && !me.isTouchingWater()
                 && !me.hasVehicle()
-                && !me.isSprinting()
                 && !me.hasStatusEffect(StatusEffects.BLINDNESS);
     }
 

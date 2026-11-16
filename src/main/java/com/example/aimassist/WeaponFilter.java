@@ -4,7 +4,9 @@ package com.example.aimassist;
 public enum WeaponFilter {
     ANY("Любое"),
     SWORD("Только меч"),
-    SWORD_AXE("Меч и топор");
+    SWORD_AXE("Меч и топор"),
+    SWORD_AXE_MACE("Меч, топор и булава"),
+    MACE("Только булава");
 
     public final String label;
 

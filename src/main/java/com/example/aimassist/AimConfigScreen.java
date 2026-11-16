@@ -140,6 +140,7 @@ public class AimConfigScreen extends Screen {
                 () -> cfg.weapon, v -> cfg.weapon = v, w -> w.label));
         atk.rows.add(new ToggleRow("Только полный взмах (100%)", () -> cfg.fullChargeOnly, v -> cfg.fullChargeOnly = v));
         atk.rows.add(new SliderRow("Мин. заряд (если взмах выкл.)", 0.1, 1.0, 2, "", () -> cfg.attackCharge, v -> cfg.attackCharge = v));
+        atk.rows.add(new ToggleRow("Сбрасывать спринт ради крита", () -> cfg.critStopSprint, v -> cfg.critStopSprint = v));
         atk.rows.add(new ToggleRow("Только криты", () -> cfg.critOnly, v -> cfg.critOnly = v));
         atk.rows.add(new ToggleRow("Не бить при еде / щите / луке", () -> cfg.noHitWhileUsing, v -> cfg.noHitWhileUsing = v));
         atk.rows.add(new ToggleRow("Подсказки на экране (отладка)", () -> cfg.attackDebug, v -> cfg.attackDebug = v));

@@ -36,6 +36,7 @@ public class AimConfig {
     public WeaponFilter weapon = WeaponFilter.ANY; // с каким оружием в руке бить
     public boolean fullChargeOnly = true;  // только полностью заряженный удар (полный взмах)
     public double attackCharge = 0.9;      // мин. заряд, если fullChargeOnly выключен (0.1 .. 1.0)
+    public boolean critStopSprint = true;  // сбрасывать спринт перед ударом, чтобы прошёл крит
     public boolean critOnly = false;       // бить только критическим ударом (падение, не на земле)
     public boolean noHitWhileUsing = true; // не бить, пока ешь / пьёшь / держишь щит / натягиваешь лук
 
